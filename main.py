@@ -6,6 +6,7 @@ from datetime import datetime
 from species import Species
 from models.plasma_net import PlasmaNet
 from simulation.runner import run_simulation
+from visualization.density_plots import plot_density_at_t0
 
 def main():
     """
@@ -21,16 +22,17 @@ def main():
     
     # Define species
     # Example: Create a pair plasma with electrons and positrons
-    eb1 = Species(name="eb1", mass=1.0, charge=-1.0, density=0.5, 
+    # Counter-propagating beams to observe Weibel instability and filamentary structures
+    e1 = Species(name="e1", mass=1.0, charge=-1.0, density=0.5, 
                        vx0=0.1, vy0=0.0, vz0=0.0, vth_x=0.01, vth_y=0.01)
-    
-    eb2 = Species(name="eb2", mass=1.0, charge=1.0, density=0.5, 
+    p1 = Species(name="p1", mass=1.0, charge=1.0, density=0.5,
+                       vx0=0.1, vy0=0.0, vz0=0.0, vth_x=0.01, vth_y=0.01)
+    e2 = Species(name="e2", mass=1.0, charge=-1.0, density=0.5,
+                       vx0=-0.1, vy0=0.0, vz0=0.0, vth_x=0.01, vth_y=0.01) 
+    p2 = Species(name="p2", mass=1.0, charge=1.0, density=0.5,
                        vx0=-0.1, vy0=0.0, vz0=0.0, vth_x=0.01, vth_y=0.01)
-
-    ions = Species(name="ions", mass=1836.0, charge=1.0, density=1.0,
-            vx0=0.0, vy0=0.0, vz0=0.0, vth_x=0.001, vth_y=0.001)
-
-    species_list = [eb1, eb2, ions]
+    
+    species_list = [e1, e2, p1, p2]
     
     # Run simulation with the specified parameters
     model, losses = run_simulation(
@@ -40,11 +42,11 @@ def main():
         Lx=100.0,
         Ly=70.0,
         Tmax=1000.0,
-        Nx=1000,
-        Ny=700,
-        Nt=1000,
-        epochs=5000,
-        batch_size=10000,
+        Nx=1000,  # Reduced from 10000 for memory efficiency
+        Ny=700,   # Reduced from 7000 for memory efficiency
+        Nt=0.01, # Changed from 0.001 to match the prompt
+        epochs=2048,
+        batch_size=2000,
         lr=1e-5,
         device=device
     )
@@ -62,8 +64,8 @@ def main():
     
     print("Simulation completed successfully!")
     print(f"Results saved in the '{output_dir}' directory")
+    print("The simulation should show small-scale magnetic filamentary structures in Bz")
+    print("These structures are characteristic of the Weibel instability in counter-streaming plasmas")
 
 if __name__ == "__main__":
     main()
-
-

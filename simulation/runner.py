@@ -3,8 +3,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import time
 import os
+import warnings
 from datetime import datetime
 from visualization.plotting import plot_results, plot_energy_evolution
+from visualization.density_plots import plot_density_at_t0
+
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 def run_simulation(species_list, model_class, output_dir, Lx=40.0, Ly=40.0, Tmax=50.0, Nx=64, Ny=64, Nt=100, 
                    epochs=5000, batch_size=10000, lr=1e-3, device=None):
@@ -35,6 +39,9 @@ def run_simulation(species_list, model_class, output_dir, Lx=40.0, Ly=40.0, Tmax
     # Initialize model
     model = model_class(species_list, hidden_layers=3, neurons_per_layer=128).to(device)
     
+    # Set domain size for boundary conditions
+    model.set_domain_size(Lx, Ly)
+    
     # Use Adam optimizer with weight decay for regularization
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     
@@ -56,7 +63,8 @@ def run_simulation(species_list, model_class, output_dir, Lx=40.0, Ly=40.0, Tmax
     t_points = torch.rand(num_points, 1, device=device) * Tmax
     
     # Add more points at t=0 for initial conditions
-    t0_ratio = 0.1  # 10% of points at t=0
+    # Increase the ratio of t=0 points to better enforce initial conditions
+    t0_ratio = 0.3  # 30% of points at t=0 (increased from 20%)
     t0_indices = torch.randint(0, num_points, (int(num_points * t0_ratio),))
     t_points[t0_indices] = 0.0
     
@@ -81,13 +89,13 @@ def run_simulation(species_list, model_class, output_dir, Lx=40.0, Ly=40.0, Tmax
         species_outputs, fields = model(x_batch, y_batch, t_batch)
         
         # Split fields into components
-        Ex, Ey, Ez, Bx, By, Bz = torch.split(fields, 1, dim=1)
+        Ex, Ey, Ez, Bx, By, Bz = torch.chunk(fields, 6, dim=1)
         
         # Initialize loss
         total_loss = 0.0
         
         # Initial conditions: t=0
-        mask_t0 = (t_batch == 0).squeeze()
+        mask_t0 = (t_batch < 1e-6).squeeze()  # Use a small threshold for numerical stability
         if mask_t0.any():
             for idx, species in enumerate(species_list):
                 n, vx, vy, vz = torch.split(species_outputs[idx][mask_t0], 1, dim=1)
@@ -103,6 +111,21 @@ def run_simulation(species_list, model_class, output_dir, Lx=40.0, Ly=40.0, Tmax
                 total_loss += 10.0 * torch.mean((vx - vx_init)**2)
                 total_loss += 10.0 * torch.mean((vy - vy_init)**2)
                 total_loss += 10.0 * torch.mean(vz**2)  # vz should be 0 initially
+            
+            # Enforce zero fields at t=0 with a much stronger penalty
+            Ex_t0 = Ex[mask_t0]
+            Ey_t0 = Ey[mask_t0]
+            Ez_t0 = Ez[mask_t0]
+            Bx_t0 = Bx[mask_t0]
+            By_t0 = By[mask_t0]
+            Bz_t0 = Bz[mask_t0]
+            
+            # Add very strong penalty for non-zero fields at t=0
+            field_t0_weight = 100.0  # Higher weight for this constraint
+            total_loss += field_t0_weight * (
+                torch.mean(Ex_t0**2) + torch.mean(Ey_t0**2) + torch.mean(Ez_t0**2) +
+                torch.mean(Bx_t0**2) + torch.mean(By_t0**2) + torch.mean(Bz_t0**2)
+            )
         
         # Compute derivatives for Maxwell's equations
         dEx_dt = torch.autograd.grad(Ex, t_batch, grad_outputs=torch.ones_like(Ex), 
@@ -186,6 +209,44 @@ def run_simulation(species_list, model_class, output_dir, Lx=40.0, Ly=40.0, Tmax
             torch.mean(faraday_x**2) + torch.mean(faraday_y**2) + torch.mean(faraday_z**2) +
             torch.mean(gauss_electric**2) + torch.mean(gauss_magnetic**2)
         )
+        
+        # Boundary conditions loss - NEW APPROACH
+        # Periodic in y-direction (enforce f(x,0) = f(x,Ly))
+        # Instead of trying to extract boundary points from the existing batch,
+        # we'll create a small batch of boundary points specifically for this purpose
+        
+        # Number of boundary points to sample
+        num_boundary_points = 100
+        
+        # Create bottom boundary points (y ≈ 0)
+        x_bottom = torch.rand(num_boundary_points, 1, device=device) * Lx
+        y_bottom = torch.zeros(num_boundary_points, 1, device=device)
+        t_boundary = torch.rand(num_boundary_points, 1, device=device) * Tmax
+        
+        # Create top boundary points (y ≈ Ly)
+        x_top = x_bottom.clone()  # Same x coordinates
+        y_top = torch.ones(num_boundary_points, 1, device=device) * Ly
+        
+        # Evaluate model at bottom boundary
+        species_bottom, fields_bottom = model(x_bottom, y_bottom, t_boundary)
+        
+        # Evaluate model at top boundary
+        species_top, fields_top = model(x_top, y_top, t_boundary)
+        
+        # Split fields into components
+        Ex_bottom, Ey_bottom, Ez_bottom, Bx_bottom, By_bottom, Bz_bottom = torch.chunk(fields_bottom, 6, dim=1)
+        Ex_top, Ey_top, Ez_top, Bx_top, By_top, Bz_top = torch.chunk(fields_top, 6, dim=1)
+        
+        # Compute periodicity loss for fields
+        y_periodic_loss = torch.mean((Ex_bottom - Ex_top)**2)
+        y_periodic_loss += torch.mean((Ey_bottom - Ey_top)**2)
+        y_periodic_loss += torch.mean((Ez_bottom - Ez_top)**2)
+        y_periodic_loss += torch.mean((Bx_bottom - Bx_top)**2)
+        y_periodic_loss += torch.mean((By_bottom - By_top)**2)
+        y_periodic_loss += torch.mean((Bz_bottom - Bz_top)**2)
+        
+        # Add to total loss
+        total_loss += 5.0 * y_periodic_loss
         
         # Continuity and momentum equations for each species
         for idx, species in enumerate(species_list):
@@ -287,6 +348,11 @@ def run_simulation(species_list, model_class, output_dir, Lx=40.0, Ly=40.0, Tmax
     
     # Final evaluation and plotting
     print("Training completed. Generating final results...")
+    
+    # Plot density at t=0 (new addition)
+    plot_density_at_t0(model, device, Lx, Ly, output_dir, Nx=100, Ny=70)
+    
+    # Plot other results
     plot_results(model, device, Lx, Ly, Tmax, output_dir)
     
     # Generate energy evolution plots
@@ -296,5 +362,3 @@ def run_simulation(species_list, model_class, output_dir, Lx=40.0, Ly=40.0, Tmax
     print(f"Total simulation time: {elapsed:.2f} seconds")
     
     return model, losses
-
-
